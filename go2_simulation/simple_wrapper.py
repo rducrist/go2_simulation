@@ -3,15 +3,20 @@ from go2_description import loadGo2
 from go2_description import GO2_DESCRIPTION_URDF_PATH, GO2_DESCRIPTION_PACKAGE_DIR
 import hppfcl
 import pinocchio as pin
+import queue
+import threading
+from pinocchio.visualize import MeshcatVisualizer
 import simple
 from go2_simulation.abstract_wrapper import AbstractSimulatorWrapper
 
 class SimpleSimulator:
-    def __init__(self, model, geom_model, visual_model, q0, args):
+    def __init__(self, model, geom_model, visual_model, q0, args, vizer = None):
         self.model = model
         self.geom_model = geom_model
         self.visual_model = visual_model
         self.args = args
+
+        self.vizer = vizer
 
         self.data = self.model.createData()
         self.geom_data = self.geom_model.createData()
@@ -97,6 +102,7 @@ class SimpleSimulator:
         self.vizer.display(q)
 
 
+
 def setPhysicsProperties(
     geom_model: pin.GeometryModel, material: str, compliance: float
 ):
@@ -127,6 +133,9 @@ def removeBVHModelsIfAny(geom_model: pin.GeometryModel):
 
 
 def addFloor(geom_model: pin.GeometryModel, visual_model: pin.GeometryModel):
+    GREY = np.array([192, 201, 229, 255]) / 255
+    color = GREY
+    color[3] = 0.5
     # Collision object
     # floor_collision_shape = hppfcl.Box(10, 10, 2)
     # M = pin.SE3(np.eye(3), np.zeros(3))
@@ -143,6 +152,7 @@ def addFloor(geom_model: pin.GeometryModel, visual_model: pin.GeometryModel):
     floor_visual_object = pin.GeometryObject(
         "floor", 0, 0, pin.SE3.Identity(), floor_visual_shape
     )
+    floor_visual_object.meshColor = color
     visual_model.addGeometryObject(floor_visual_object)
 
 def addSystemCollisionPairs(model, geom_model, qref):
@@ -237,13 +247,66 @@ class SimpleWrapper(AbstractSimulatorWrapper):
             else:
                 i = i + 1
 
+        # Create meshcat visualizer 
+        try:
+            import meshcat
+        except ImportError:
+            print(
+                "Could not import meshcat. Please install the module"
+                "to display to robot."
+            )
+
+        zmq_url = "tcp://127.0.0.1:6003"  # debug
+        self.vizer: MeshcatVisualizer = MeshcatVisualizer(
+            self.rmodel,
+            self.geom_model,
+            visual_model,
+        )
+
+        # initialize the viewer in a separate thread in case it blocks because no meshcat server is running
+        result_queue = queue.Queue()
+
+        def initialize_viewer():
+            viewer = meshcat.Visualizer(zmq_url=zmq_url)
+            result_queue.put(viewer)
+
+        viewer_thread = threading.Thread(target=initialize_viewer)
+        viewer_thread.start()
+        try:
+            viewer = result_queue.get(timeout=2)  # wait for 2 seconds
+        except queue.Empty:
+            viewer = None
+
+        if viewer is None:
+            print(
+                "Failed to initialize viewer. Make sure meshcat-server is running and check the zmq_url. Initializing in new window."
+            )
+            self.vizer.initViewer(open=True, loadModel=True)
+        else:
+            BEIGE = np.array([252, 247, 234, 255]) / 255
+            viewer.delete()  # clear prev. viewer
+            viewer["/Background"].set_property("top_color", BEIGE[:3].tolist())
+            viewer["/Background"].set_property(
+                "bottom_color", BEIGE[:3].tolist()
+            )
+            viewer["/Lights/SpotLight/<object>"].set_property(
+                "position", [-10, -10, -10]
+            )
+            viewer["/Lights/PointLightPositiveX/<object>"].set_property(
+                "position", [10, 10, 10]
+            )
+            self.vizer.initViewer(viewer=viewer, open=False, loadModel=True)
+
         # Create the simulator object
-        self.simulator = SimpleSimulator(self.rmodel, self.geom_model, visual_model, initial_q, self.params)
+        self.simulator = SimpleSimulator(self.rmodel, self.geom_model, visual_model, initial_q, self.params, vizer=self.vizer)
 
     def step(self, tau_cmd):
         # Execute step and get new state
         torque_simu = np.zeros(self.rmodel.nv)
         torque_simu[6:] = tau_cmd
         q_current, v_current, a_current, f_current = self.simulator.execute(torque_simu)
+        self.simulator.view_state(q_current)
+
+        
 
         return q_current, v_current, a_current, f_current
