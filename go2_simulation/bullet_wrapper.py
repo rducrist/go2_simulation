@@ -6,6 +6,8 @@ from scipy.spatial.transform import Rotation as R
 from go2_simulation.abstract_wrapper import AbstractSimulatorWrapper
 from ament_index_python.packages import get_package_share_directory
 import os
+import time
+import collections
 
 class BulletWrapper(AbstractSimulatorWrapper):
     def __init__(self, timestep):
@@ -30,8 +32,8 @@ class BulletWrapper(AbstractSimulatorWrapper):
         self.env_ids.append(self.plane_id)
         pybullet.resetBasePositionAndOrientation(self.plane_id, self.localInertiaPos, [0, 0, 0, 1])
 
-        self.ramp_id = pybullet.loadURDF( os.path.join(get_package_share_directory("go2_simulation"), "data/assets/obstacles.urdf"))
-        self.env_ids.append(self.ramp_id)
+        # self.ramp_id = pybullet.loadURDF( os.path.join(get_package_share_directory("go2_simulation"), "data/assets/obstacles.urdf"))
+        # self.env_ids.append(self.ramp_id)
 
         # Set time step
         pybullet.setTimeStep(timestep)
@@ -75,6 +77,8 @@ class BulletWrapper(AbstractSimulatorWrapper):
         self.dt = timestep
         self.v_last = None
 
+        self.step_times = collections.deque(maxlen=100) 
+
     def get_joint_id(self, joint_name):
         num_joints = pybullet.getNumJoints(self.robot)
         for i in range(num_joints):
@@ -84,6 +88,7 @@ class BulletWrapper(AbstractSimulatorWrapper):
         return None  # Joint name not found
 
     def step(self, tau_cmd):
+        start_ns = time.perf_counter_ns()
         # Set actuation
         pybullet.setJointMotorControlArray(
             bodyIndex=self.robot,
@@ -93,6 +98,7 @@ class BulletWrapper(AbstractSimulatorWrapper):
         )
 
         # Advance simulation by one step
+        
         pybullet.stepSimulation()
 
         # Get new state
@@ -128,6 +134,12 @@ class BulletWrapper(AbstractSimulatorWrapper):
             for id in self.env_ids:
                 contact_points += pybullet.getClosestPoints(self.robot, id, 0.005, joint_idx)
             if len(contact_points) > 0: # If contact
-                f_current[i] = 100 # arbitrary value for now
+                f_current[i] = 1 # arbitrary value for now
 
+        end_ns = time.perf_counter_ns()
+
+        elapsed = (end_ns - start_ns) / 1e6
+        self.step_times.append(elapsed)
+        moving_avg = np.mean(self.step_times)
+        print(f"BulletWrapper.step execution time avg: {moving_avg:.2f} ms")
         return q_current, v_current, a_current, f_current

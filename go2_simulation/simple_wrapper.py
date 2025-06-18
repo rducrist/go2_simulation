@@ -9,6 +9,10 @@ from pinocchio.visualize import MeshcatVisualizer
 import simple
 from go2_simulation.abstract_wrapper import AbstractSimulatorWrapper
 
+import collections
+
+import time
+
 class SimpleSimulator:
     def __init__(self, model, geom_model, visual_model, q0, args, vizer = None):
         self.model = model
@@ -35,6 +39,9 @@ class SimpleSimulator:
 
         # Simulation parameters
         self.simulator = simple.Simulator(model, self.data, geom_model, self.geom_data)
+
+        self.contacts = self.simulator.constraints_problem.pairs_in_collision
+
         # admm
         self.simulator.admm_constraint_solver_settings.absolute_precision = args["tol"]
         self.simulator.admm_constraint_solver_settings.relative_precision = args["tol_rel"]
@@ -76,8 +83,6 @@ class SimpleSimulator:
         self.a = np.zeros(self.model.nv)
         self.f_feet = np.zeros(4)
 
-        fps = min([self.args["max_fps"], 1.0 / self.dt])
-        self.dt_vis = 1.0 / float(fps)
         self.simulator.reset()
 
 
@@ -96,7 +101,7 @@ class SimpleSimulator:
         #if time_until_next_step > 0:
         #    time.sleep(time_until_next_step)
 
-        return self.q, self.v, self.a, self.f_feet
+        return self.q, self.v, self.a
 
     def view_state(self, q):
         self.vizer.display(q)
@@ -199,6 +204,11 @@ class SimpleWrapper(AbstractSimulatorWrapper):
         robot = loadGo2()
         self.rmodel = robot.model
 
+        self.vis_counter = 0
+        self.vis_every = 100
+
+        self.step_times = collections.deque(maxlen=100)
+
         with open(GO2_DESCRIPTION_URDF_PATH, 'r') as file:
             file_content = file.read()
 
@@ -224,6 +234,9 @@ class SimpleWrapper(AbstractSimulatorWrapper):
             'max_patch_size': node.declare_parameter('max_patch_size', 4).value,
             'patch_tolerance': node.declare_parameter('patch_tolerance', 1e-3).value,
         }
+
+        self.vis_counter = 0
+        self.fps = min([self.params["max_fps"], 1.0 / self.params["dt"]])
 
         self.init_simple(timestep)
 
@@ -256,7 +269,7 @@ class SimpleWrapper(AbstractSimulatorWrapper):
                 "to display to robot."
             )
 
-        zmq_url = "tcp://127.0.0.1:6003"  # debug
+        zmq_url = "tcp://127.0.0.1:6000"  # debug
         self.vizer: MeshcatVisualizer = MeshcatVisualizer(
             self.rmodel,
             self.geom_model,
@@ -301,12 +314,49 @@ class SimpleWrapper(AbstractSimulatorWrapper):
         self.simulator = SimpleSimulator(self.rmodel, self.geom_model, visual_model, initial_q, self.params, vizer=self.vizer)
 
     def step(self, tau_cmd):
+        start_ns = time.perf_counter_ns()
         # Execute step and get new state
+        self.vis_counter += 1
+        
+        foot_names = ["FR_foot_0", "FL_foot_0", "RR_foot_0", "RL_foot_0"]
+        ground_name = "floor"
+        contact_active = np.zeros(4)
+
+        contacts = self.simulator.contacts.tolist()
+        coll_pairs = self.simulator.geom_model.collisionPairs.tolist()
+        for contact_pair_idx in contacts:
+            cp = coll_pairs[contact_pair_idx]
+            first = self.simulator.geom_model.geometryObjects[cp.first].name
+            second = self.simulator.geom_model.geometryObjects[cp.second].name
+            names = {first, second}
+
+            # if self.vis_counter % self.vis_every == 0:
+            #     print(f"First {first}  <<>> Second {second} \n")
+
+            if first in foot_names:
+                contact_active[foot_names.index(first)] = 1
+            
+
+            # # If floor and any of the feet names in the coll_pairs, write one at the respective index in contact_active. If not let zero 
+            # for idx, foot in enumerate(foot_names):
+            #     if ground_name in names and foot in names:
+            #         contact_active[idx] = 1
+
         torque_simu = np.zeros(self.rmodel.nv)
         torque_simu[6:] = tau_cmd
-        q_current, v_current, a_current, f_current = self.simulator.execute(torque_simu)
-        self.simulator.view_state(q_current)
 
         
+        q_current, v_current, a_current = self.simulator.execute(torque_simu)
+        
+        f_current = contact_active
+
+        if self.vis_counter % self.vis_every == 0:
+            self.simulator.view_state(q_current)
+
+        end_ns = time.perf_counter_ns()
+        elapsed = (end_ns - start_ns) /1e6
+        self.step_times.append(elapsed)
+        moving_avg = np.mean(self.step_times)
+        print(f"SimpleWrapper.step execution time avg: {moving_avg:.2f} ms")
 
         return q_current, v_current, a_current, f_current

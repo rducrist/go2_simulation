@@ -28,6 +28,9 @@ class Go2Simulation(Node):
         self.create_subscription(LowCmd, "/lowcmd", self.receive_cmd_cb, 10)
         self.last_cmd_msg = LowCmd()
 
+        self.torque_log = []
+        self.last_torque_log_time = 0.02  # seconds
+
         ########################## Simulator
         self.get_logger().info("go2_simulator::loading simulator")
         timestep = self.high_level_period / self.low_level_sub_step
@@ -51,7 +54,7 @@ class Go2Simulation(Node):
 
     def update(self):
         ## Control robot
-        q_des   = np.array([self.last_cmd_msg.motor_cmd[i].q   for i in range(12)])
+        q_des   = np.array([self.last_cmd_msg.motor_cmd[i].q   for i in range(12)]) 
         v_des   = np.array([self.last_cmd_msg.motor_cmd[i].dq  for i in range(12)])
         tau_des = np.array([self.last_cmd_msg.motor_cmd[i].tau for i in range(12)])
         kp_des  = np.array([self.last_cmd_msg.motor_cmd[i].kp  for i in range(12)])
@@ -77,7 +80,7 @@ class Go2Simulation(Node):
             low_msg.motor_state[joint_idx].dq = self.v_current[6 + joint_idx]
 
         # Contact sensors reading
-        low_msg.foot_force = self.f_current.astype(np.int32).tolist()
+        low_msg.foot_force = (self.f_current).astype(np.int32).tolist()
 
         # Format IMU
         quat_xyzw = self.q_current[3:7].tolist()
@@ -133,20 +136,49 @@ class Go2Simulation(Node):
         transform_msg.transform.rotation.w = self.q_current[6]
         self.tf_broadcaster.sendTransform(transform_msg)
 
+        # Save torque per foot
+        RL_hip_des = tau_cmd[0]
+        FR_hip_des = tau_cmd[3]
+        FL_hip_des = tau_cmd[6]
+        RR_hip_des = tau_cmd[9]
+        now = self.get_clock().now().nanoseconds * 1e-9  # seconds
+        if now - self.last_torque_log_time > 0.01:  # 10 ms
+            self.torque_log.append([now, RL_hip_des, FR_hip_des, FL_hip_des, RR_hip_des])
+            self.last_torque_log_time = now
+
     def receive_cmd_cb(self, msg):
         self.last_cmd_msg = msg
 
+    def plot_torques(self):
+        import numpy as np
+        import matplotlib.pyplot as plt
+        arr = np.array(self.torque_log)
+        if arr.shape[0] == 0:
+            print("No torque data to plot.")
+            return
+        t = arr[:, 0] - arr[0, 0]
+        plt.figure()
+        plt.plot(t, arr[:, 1], label="RL")
+        plt.plot(t, arr[:, 2], label="FR")
+        plt.plot(t, arr[:, 3], label="FL")
+        plt.plot(t, arr[:, 4], label="RR")
+        plt.xlabel("Time [s]")
+        plt.ylabel("Commanded Torque [Nm]")
+        plt.legend()
+        plt.title("Hip Commanded Torques Over Time")
+        plt.show()
+
 def main(args=None):
     rclpy.init(args=args)
+    go2_simulation = Go2Simulation()
     try:
-        go2_simulation = Go2Simulation()
         rclpy.spin(go2_simulation)
-    except rclpy.exceptions.ROSInterruptException:
+    except (rclpy.exceptions.ROSInterruptException, KeyboardInterrupt):
         pass
-
-    go2_simulation.destroy_node()
-    rclpy.shutdown()
-
+    finally:
+        go2_simulation.plot_torques()
+        go2_simulation.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
