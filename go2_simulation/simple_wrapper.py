@@ -246,7 +246,12 @@ class SimpleWrapper(AbstractSimulatorWrapper):
 
         # Set simulation properties
         self.params["dt"] = timestep
-        initial_q = np.array([0, 0, 0.2, 0, 0, 0, 1, 0.0, 1.00, -2.51, 0.0, 1.09, -2.61, 0.2, 1.19, -2.59, -0.2, 1.32, -2.79])
+        initial_q = np.array([0, 0, 0.15, 0, 0, 0, 1, 0.0, 0.9, -2.5, 0.0, 0.9, -2.5, 0., 0.9, -2.5, 0, 0.9, -2.5])
+
+        # Unitree joint ordering (FR, FL, RR, RL)
+        self.joint_order = [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
+
+
         setPhysicsProperties(self.geom_model, self.params["material"], self.params["compliance"])
         removeBVHModelsIfAny(self.geom_model)
         addSystemCollisionPairs(self.rmodel, self.geom_model, initial_q)
@@ -315,6 +320,8 @@ class SimpleWrapper(AbstractSimulatorWrapper):
 
     def step(self, tau_cmd):
         start_ns = time.perf_counter_ns()
+
+
         # Execute step and get new state
         self.vis_counter += 1
         
@@ -342,12 +349,21 @@ class SimpleWrapper(AbstractSimulatorWrapper):
             #     if ground_name in names and foot in names:
             #         contact_active[idx] = 1
 
+        # Change torque order from unitree to pinocchio
         torque_simu = np.zeros(self.rmodel.nv)
-        torque_simu[6:] = tau_cmd
+        for i in range(12):
+            torque_simu[6 + i] = tau_cmd[self.joint_order[i]]
 
         
         q_current, v_current, a_current = self.simulator.execute(torque_simu)
-        
+
+        q_unitree = q_current.copy()
+        v_unitree = v_current.copy()
+
+        for i in range(12):
+            q_unitree[7 + i] = q_current[7 + self.joint_order[i]]
+            v_unitree[6 + i] = v_current[6 + self.joint_order[i]]
+            
         f_current = contact_active
 
         if self.vis_counter % self.vis_every == 0:
@@ -359,4 +375,4 @@ class SimpleWrapper(AbstractSimulatorWrapper):
         moving_avg = np.mean(self.step_times)
         print(f"SimpleWrapper.step execution time avg: {moving_avg:.2f} ms")
 
-        return q_current, v_current, a_current, f_current
+        return q_unitree, v_unitree, a_current, f_current
